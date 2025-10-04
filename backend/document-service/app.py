@@ -37,7 +37,7 @@ class DocumentService:
     
     async def update_document(self, doc_id: str, updates: dict) -> Document:
         if doc_id not in self.version_history:
-            raise HTTPException(status_code=404, message="Document not found")
+            raise HTTPException(status_code=404, detail="Document not found")
             
         current_doc = self.version_history[doc_id][-1]
         new_version = Document(
@@ -50,6 +50,15 @@ class DocumentService:
         return new_version
 
 document_service = DocumentService()
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+@app.get("/readyz")
+async def readyz():
+    # In real world, check DB/cache readiness. Here, return ok.
+    return {"status": "ready"}
 
 @app.post("/documents/", response_model=Document)
 async def create_document(doc_data: dict, token: str = Security(oauth2_scheme)):

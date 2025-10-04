@@ -44,6 +44,14 @@ class AIOrchestratorService:
 
 ai_orchestrator = AIOrchestratorService()
 
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+@app.get("/readyz")
+async def readyz():
+    return {"status": "ready"}
+
 @app.post("/ai/analyze")
 async def analyze_document(task_data: dict, token: str = Security(oauth2_scheme)):
     task_type = task_data.get("task_type")

@@ -6,10 +6,19 @@ import os
 import base64
 from typing import Dict, Any
 
+
+class EncryptionError(Exception):
+    pass
+
+
+class DecryptionError(Exception):
+    pass
+
 class EncryptionService:
     def __init__(self):
         self.master_key = os.getenv('ENCRYPTION_MASTER_KEY')
-        self.salt = os.urandom(16)
+        if not self.master_key or len(self.master_key) < 16:
+            raise EncryptionError("ENCRYPTION_MASTER_KEY is missing or too short")
         self.method = 'AES-256-GCM'
     
     async def encrypt_document(
@@ -22,7 +31,11 @@ class EncryptionService:
             # Generate document-specific key
             doc_key = await self._generate_document_key(metadata)
             
-            # Create AESGCM instance
+            # Derive per-document salt; persist alongside ciphertext
+            salt = os.urandom(16)
+            doc_key = await self._generate_document_key(metadata, salt)
+
+            # Create AESGCM instance and nonce
             aesgcm = AESGCM(doc_key)
             nonce = os.urandom(12)
             
@@ -33,8 +46,8 @@ class EncryptionService:
                 metadata.get('additional_data', None)
             )
             
-            # Combine nonce and encrypted content
-            return nonce + encrypted_content
+            # Return salt + nonce + ciphertext so decrypt can reconstruct
+            return salt + nonce + encrypted_content
             
         except Exception as e:
             raise EncryptionError(f"Encryption failed: {str(e)}")
@@ -46,12 +59,15 @@ class EncryptionService:
     ) -> bytes:
         """Decrypt document content"""
         try:
-            # Generate document-specific key
-            doc_key = await self._generate_document_key(metadata)
-            
-            # Extract nonce and ciphertext
-            nonce = encrypted_content[:12]
-            ciphertext = encrypted_content[12:]
+            # Extract salt, nonce, ciphertext
+            if len(encrypted_content) < 28:
+                raise DecryptionError("Encrypted payload too short")
+            salt = encrypted_content[:16]
+            nonce = encrypted_content[16:28]
+            ciphertext = encrypted_content[28:]
+
+            # Generate document-specific key using extracted salt
+            doc_key = await self._generate_document_key(metadata, salt)
             
             # Create AESGCM instance
             aesgcm = AESGCM(doc_key)
@@ -68,13 +84,14 @@ class EncryptionService:
     
     async def _generate_document_key(
         self,
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        salt: bytes
     ) -> bytes:
         """Generate document-specific encryption key"""
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=self.salt,
+            salt=salt,
             iterations=100000
         )
         
