@@ -1,0 +1,290 @@
+﻿# =============================================================================
+# AI Legal Agent  Podman / Docker Compose
+# Compatible with: podman compose (Podman 4+), podman-compose, docker compose
+#
+# Quick start:
+#   cp .env.example .env        # then edit with your API keys
+#   podman compose up --build
+# =============================================================================
+
+services:
+
+  #  Infrastructure 
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: legal-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-legal_automation}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-legal_automation}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  mongodb:
+    image: mongo:7
+    container_name: legal-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: legal_automation
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    container_name: legal-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  #  Database Initializer (one-shot) 
+
+  init-db:
+    build:
+      context: .
+      dockerfile: backend/api-gateway/Dockerfile
+    container_name: legal-init-db
+    command: python /app/scripts/init_db.py
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-legal_automation}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./scripts:/app/scripts:ro
+
+  #  Backend Services 
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: backend/api-gateway/Dockerfile
+    container_name: legal-api-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-legal_automation}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-min-32-chars}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init-db:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  ai-orchestrator:
+    build:
+      context: .
+      dockerfile: backend/ai-orchestrator/Dockerfile
+    container_name: legal-ai-orchestrator
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-legal_automation}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-min-32-chars}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s  # spaCy model download may take several minutes on first start
+
+  document-service:
+    build:
+      context: .
+      dockerfile: backend/document-service/Dockerfile
+    container_name: legal-document-service
+    restart: unless-stopped
+    ports:
+      - "8002:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-legal_automation}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-min-32-chars}
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:-change-me-minimum-32-characters-here}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init-db:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  compliance-service:
+    build:
+      context: .
+      dockerfile: backend/compliance-service/Dockerfile
+    container_name: legal-compliance-service
+    restart: unless-stopped
+    ports:
+      - "8003:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-legal_automation}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-min-32-chars}
+      NOTIFICATION_SERVICE_URL: http://notification-service:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  audit-service:
+    build:
+      context: .
+      dockerfile: backend/audit-service/Dockerfile
+    container_name: legal-audit-service
+    restart: unless-stopped
+    ports:
+      - "8004:8000"
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017/legal_automation
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-min-32-chars}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: backend/notification-service/Dockerfile
+    container_name: legal-notification-service
+    restart: unless-stopped
+    ports:
+      - "8005:8000"
+    environment:
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-min-32-chars}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  template-service:
+    build:
+      context: .
+      dockerfile: backend/template-service/Dockerfile
+    container_name: legal-template-service
+    restart: unless-stopped
+    ports:
+      - "8006:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-legal_automation}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-min-32-chars}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  integration-service:
+    build:
+      context: .
+      dockerfile: backend/integration-service/Dockerfile
+    container_name: legal-integration-service
+    restart: unless-stopped
+    ports:
+      - "8007:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-legal_automation}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-min-32-chars}
+      LEGAL_RESEARCH_API_KEY: ${LEGAL_RESEARCH_API_KEY:-}
+      ESIGN_API_KEY: ${ESIGN_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  #  Frontend 
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: legal-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    environment:
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:8000}
+      REACT_APP_WS_URL: ${REACT_APP_WS_URL:-ws://localhost:8005}
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  redis_data:
+
+networks:
+  default:
+    name: legal-agent-net
