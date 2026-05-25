@@ -1,0 +1,7 @@
+fastapi>=0.111
+uvicorn[standard]>=0.29
+sqlmodel>=0.0.16
+anthropic>=0.28
+python-dotenv>=1.0
+python-multipart>=0.0.9
+psycopg2-binary>=2.9
