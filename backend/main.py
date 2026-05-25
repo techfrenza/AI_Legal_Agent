@@ -1,12 +1,15 @@
+import logging
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from database import create_db
+from database import DB_BACKEND, create_db
 from routers import documents, analysis, templates, notifications
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Legal Agent MVP")
 
@@ -27,6 +30,10 @@ app.include_router(notifications.router, tags=["notifications"])
 
 @app.on_event("startup")
 def on_startup():
+    if DB_BACKEND == "supabase":
+        logger.info("Database backend: Supabase (PostgreSQL via psycopg2)")
+    else:
+        logger.info("Database backend: SQLite (local)")
     create_db()
 
 
